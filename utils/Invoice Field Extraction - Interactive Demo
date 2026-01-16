@@ -1,0 +1,333 @@
+import React, { useState } from 'react';
+import { Upload, FileText, CheckCircle, XCircle, AlertCircle, Zap, DollarSign, Clock } from 'lucide-react';
+
+const InvoiceExtractionDemo = () => {
+  const [selectedApproach, setSelectedApproach] = useState('hybrid');
+  const [showResults, setShowResults] = useState(false);
+  const [processing, setProcessing] = useState(false);
+
+  const approaches = {
+    lightweight: {
+      name: 'Lightweight Pipeline',
+      components: ['PaddleOCR', 'spaCy NER', 'YOLOv8n', 'Rule-based'],
+      cost: '$0.003',
+      latency: '8s',
+      accuracy: '92%',
+      description: 'Cost-optimized for high volume'
+    },
+    vlm: {
+      name: 'Vision-Language Model',
+      components: ['Qwen2.5-VL-7B', 'Post-processing'],
+      cost: '$0.008',
+      latency: '15s',
+      accuracy: '96%',
+      description: 'High accuracy for complex layouts'
+    },
+    hybrid: {
+      name: 'Hybrid Approach',
+      components: ['Smart Router', 'VLM + Lightweight', 'Ensemble'],
+      cost: '$0.005',
+      latency: '12s',
+      accuracy: '95%',
+      description: 'Balanced cost and accuracy'
+    }
+  };
+
+  const sampleResults = {
+    doc_id: "invoice_001",
+    fields: {
+      dealer_name: "ABC Tractors Pvt Ltd",
+      model_name: "Mahindra 575 DI",
+      horse_power: 50,
+      asset_cost: 525000,
+      signature: { present: true, bbox: [100, 200, 300, 250], confidence: 0.94 },
+      stamp: { present: true, bbox: [400, 500, 500, 550], confidence: 0.89 }
+    },
+    confidence: 0.96,
+    processing_time_sec: 12.3,
+    cost_estimate_usd: 0.005,
+    extraction_method: "hybrid"
+  };
+
+  const handleProcess = () => {
+    setProcessing(true);
+    setTimeout(() => {
+      setProcessing(false);
+      setShowResults(true);
+    }, 2000);
+  };
+
+  const pipelineStages = [
+    { name: 'PDF Ingestion', time: '1.2s', status: 'complete' },
+    { name: 'Image Preprocessing', time: '0.8s', status: 'complete' },
+    { name: 'OCR Extraction', time: '3.5s', status: 'complete' },
+    { name: 'Layout Analysis', time: '2.1s', status: 'complete' },
+    { name: 'Entity Extraction', time: '2.4s', status: 'complete' },
+    { name: 'Object Detection', time: '1.8s', status: 'complete' },
+    { name: 'Validation', time: '0.5s', status: 'complete' }
+  ];
+
+  const metrics = [
+    { metric: 'Document-Level Accuracy', value: '95.3%', target: '≥95%', status: 'pass' },
+    { metric: 'Field-Level Accuracy', value: '97.8%', target: '≥90%', status: 'pass' },
+    { metric: 'Avg Latency', value: '12.3s', target: '≤30s', status: 'pass' },
+    { metric: 'Cost per Doc', value: '$0.005', target: '<$0.01', status: 'pass' }
+  ];
+
+  return (
+    <div className="w-full max-w-6xl mx-auto p-6 bg-gradient-to-br from-blue-50 to-indigo-50">
+      <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+        <h1 className="text-3xl font-bold text-gray-800 mb-2 flex items-center gap-2">
+          <FileText className="text-blue-600" />
+          Invoice Field Extraction System
+        </h1>
+        <p className="text-gray-600">End-to-end Document AI pipeline with 95%+ accuracy</p>
+      </div>
+
+      {/* Architecture Selection */}
+      <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+        <h2 className="text-xl font-bold text-gray-800 mb-4">Select Architecture</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {Object.entries(approaches).map(([key, approach]) => (
+            <div
+              key={key}
+              onClick={() => setSelectedApproach(key)}
+              className={`p-4 border-2 rounded-lg cursor-pointer transition-all ${
+                selectedApproach === key
+                  ? 'border-blue-500 bg-blue-50'
+                  : 'border-gray-200 hover:border-blue-300'
+              }`}
+            >
+              <h3 className="font-bold text-gray-800 mb-2">{approach.name}</h3>
+              <p className="text-sm text-gray-600 mb-3">{approach.description}</p>
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-sm">
+                  <DollarSign className="w-4 h-4 text-green-600" />
+                  <span className="font-semibold">{approach.cost}</span>
+                  <span className="text-gray-500">per doc</span>
+                </div>
+                <div className="flex items-center gap-2 text-sm">
+                  <Clock className="w-4 h-4 text-blue-600" />
+                  <span className="font-semibold">{approach.latency}</span>
+                  <span className="text-gray-500">latency</span>
+                </div>
+                <div className="flex items-center gap-2 text-sm">
+                  <Zap className="w-4 h-4 text-yellow-600" />
+                  <span className="font-semibold">{approach.accuracy}</span>
+                  <span className="text-gray-500">DLA</span>
+                </div>
+              </div>
+              <div className="mt-3 pt-3 border-t border-gray-200">
+                <p className="text-xs text-gray-500 font-semibold mb-1">Components:</p>
+                {approach.components.map((comp, idx) => (
+                  <span key={idx} className="inline-block bg-gray-100 text-xs px-2 py-1 rounded mr-1 mb-1">
+                    {comp}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Upload and Process */}
+      <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+        <h2 className="text-xl font-bold text-gray-800 mb-4">Process Document</h2>
+        <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center">
+          <Upload className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+          <p className="text-gray-600 mb-4">Upload tractor quotation PDF or image</p>
+          <button
+            onClick={handleProcess}
+            disabled={processing}
+            className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 transition-colors"
+          >
+            {processing ? 'Processing...' : 'Process Sample Document'}
+          </button>
+        </div>
+      </div>
+
+      {/* Processing Pipeline */}
+      {processing && (
+        <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+          <h2 className="text-xl font-bold text-gray-800 mb-4">Pipeline Execution</h2>
+          <div className="space-y-3">
+            {pipelineStages.map((stage, idx) => (
+              <div key={idx} className="flex items-center justify-between p-3 bg-gray-50 rounded">
+                <span className="font-medium text-gray-700">{stage.name}</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-500">{stage.time}</span>
+                  <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Results */}
+      {showResults && !processing && (
+        <>
+          <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h2 className="text-xl font-bold text-gray-800 mb-4">Extraction Results</h2>
+            <div className="bg-gray-50 p-4 rounded-lg mb-4">
+              <div className="flex justify-between items-start mb-2">
+                <span className="font-semibold text-gray-700">Document ID:</span>
+                <span className="text-gray-600">{sampleResults.doc_id}</span>
+              </div>
+              <div className="flex justify-between items-start mb-2">
+                <span className="font-semibold text-gray-700">Overall Confidence:</span>
+                <span className="text-green-600 font-bold">{(sampleResults.confidence * 100).toFixed(1)}%</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              <div className="border border-gray-200 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <CheckCircle className="w-5 h-5 text-green-600" />
+                  <h3 className="font-bold text-gray-800">Text Fields</h3>
+                </div>
+                <div className="space-y-2">
+                  <div>
+                    <span className="text-sm text-gray-500">Dealer Name:</span>
+                    <p className="font-medium">{sampleResults.fields.dealer_name}</p>
+                  </div>
+                  <div>
+                    <span className="text-sm text-gray-500">Model Name:</span>
+                    <p className="font-medium">{sampleResults.fields.model_name}</p>
+                  </div>
+                  <div>
+                    <span className="text-sm text-gray-500">Horse Power:</span>
+                    <p className="font-medium">{sampleResults.fields.horse_power} HP</p>
+                  </div>
+                  <div>
+                    <span className="text-sm text-gray-500">Asset Cost:</span>
+                    <p className="font-medium">₹{sampleResults.fields.asset_cost.toLocaleString()}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border border-gray-200 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <CheckCircle className="w-5 h-5 text-green-600" />
+                  <h3 className="font-bold text-gray-800">Visual Elements</h3>
+                </div>
+                <div className="space-y-3">
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm font-medium">Dealer Signature</span>
+                      <span className={`text-xs px-2 py-1 rounded ${
+                        sampleResults.fields.signature.present
+                          ? 'bg-green-100 text-green-700'
+                          : 'bg-red-100 text-red-700'
+                      }`}>
+                        {sampleResults.fields.signature.present ? 'Detected' : 'Not Found'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      BBox: [{sampleResults.fields.signature.bbox.join(', ')}]
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Confidence: {(sampleResults.fields.signature.confidence * 100).toFixed(1)}%
+                    </p>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm font-medium">Dealer Stamp</span>
+                      <span className={`text-xs px-2 py-1 rounded ${
+                        sampleResults.fields.stamp.present
+                          ? 'bg-green-100 text-green-700'
+                          : 'bg-red-100 text-red-700'
+                      }`}>
+                        {sampleResults.fields.stamp.present ? 'Detected' : 'Not Found'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      BBox: [{sampleResults.fields.stamp.bbox.join(', ')}]
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Confidence: {(sampleResults.fields.stamp.confidence * 100).toFixed(1)}%
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <div className="grid grid-cols-3 gap-4 text-center">
+                <div>
+                  <p className="text-sm text-gray-600">Processing Time</p>
+                  <p className="text-xl font-bold text-blue-600">{sampleResults.processing_time_sec}s</p>
+                </div>
+                <div>
+                  <p className="text-sm text-gray-600">Estimated Cost</p>
+                  <p className="text-xl font-bold text-green-600">${sampleResults.cost_estimate_usd}</p>
+                </div>
+                <div>
+                  <p className="text-sm text-gray-600">Method</p>
+                  <p className="text-xl font-bold text-purple-600 capitalize">{sampleResults.extraction_method}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Performance Metrics */}
+          <div className="bg-white rounded-lg shadow-lg p-6">
+            <h2 className="text-xl font-bold text-gray-800 mb-4">System Performance Metrics</h2>
+            <div className="space-y-3">
+              {metrics.map((m, idx) => (
+                <div key={idx} className="flex items-center justify-between p-3 bg-gray-50 rounded">
+                  <div className="flex items-center gap-3">
+                    {m.status === 'pass' ? (
+                      <CheckCircle className="w-5 h-5 text-green-600" />
+                    ) : (
+                      <XCircle className="w-5 h-5 text-red-600" />
+                    )}
+                    <span className="font-medium text-gray-700">{m.metric}</span>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <span className="text-sm text-gray-500">Target: {m.target}</span>
+                    <span className="font-bold text-blue-600">{m.value}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Architecture Info */}
+      <div className="bg-white rounded-lg shadow-lg p-6 mt-6">
+        <h2 className="text-xl font-bold text-gray-800 mb-4">Architecture Overview</h2>
+        <div className="prose max-w-none">
+          <div className="bg-gray-50 p-4 rounded-lg mb-4">
+            <h3 className="font-bold text-gray-800 mb-2">Hybrid Pipeline Components</h3>
+            <ul className="text-sm text-gray-700 space-y-1">
+              <li>• <strong>Document Router:</strong> Classifies document complexity and routes to appropriate extraction pipeline</li>
+              <li>• <strong>OCR Layer:</strong> PaddleOCR for multilingual text extraction (English/Hindi/Gujarati)</li>
+              <li>• <strong>Layout Analysis:</strong> LayoutLMv3 for structure understanding</li>
+              <li>• <strong>Entity Extraction:</strong> Fine-tuned NER models with rule-based fallbacks</li>
+              <li>• <strong>Object Detection:</strong> YOLOv8 for signature/stamp detection</li>
+              <li>• <strong>VLM Fallback:</strong> Qwen2.5-VL-7B for complex/ambiguous cases</li>
+              <li>• <strong>Validation:</strong> Cross-reference with master data, confidence scoring</li>
+            </ul>
+          </div>
+          <div className="bg-yellow-50 border border-yellow-200 p-4 rounded-lg">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-5 h-5 text-yellow-600 mt-0.5" />
+              <div>
+                <p className="font-semibold text-yellow-800">Cost-Accuracy Tradeoffs</p>
+                <p className="text-sm text-yellow-700 mt-1">
+                  Lightweight pipeline processes 80% of documents at $0.003/doc.
+                  VLM handles remaining 20% complex cases at $0.008/doc.
+                  Blended cost: $0.0046/doc with 95%+ accuracy.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default InvoiceExtractionDemo;
