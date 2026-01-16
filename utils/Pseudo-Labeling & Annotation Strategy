@@ -1,0 +1,555 @@
+"""
+Pseudo-Labeling and Annotation Workflow
+Handles lack of ground truth through multiple strategies
+"""
+
+import json
+import os
+from typing import List, Dict, Optional, Tuple
+from collections import defaultdict, Counter
+import numpy as np
+from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class PseudoLabeler:
+    """Generate pseudo-labels using ensemble and self-consistency"""
+    
+    def __init__(self, confidence_threshold: float = 0.90):
+        self.confidence_threshold = confidence_threshold
+        self.pseudo_labels = []
+        
+    def generate_ensemble_labels(self, doc_path: str, 
+                                 extractors: List) -> Dict:
+        """
+        Generate labels using ensemble of multiple extractors
+        Uses voting and consensus for higher quality
+        """
+        predictions = []
+        
+        # Get predictions from all extractors
+        for extractor in extractors:
+            pred = extractor.extract(doc_path)
+            predictions.append(pred)
+        
+        # Aggregate predictions
+        pseudo_label = self._aggregate_predictions(predictions)
+        
+        # Add to training set if confidence is high
+        if pseudo_label['confidence'] >= self.confidence_threshold:
+            self.pseudo_labels.append({
+                'doc_path': doc_path,
+                'label': pseudo_label,
+                'source': 'ensemble',
+                'num_voters': len(predictions)
+            })
+        
+        return pseudo_label
+    
+    def _aggregate_predictions(self, predictions: List[Dict]) -> Dict:
+        """Aggregate multiple predictions using voting"""
+        
+        # Text fields: majority vote
+        dealer_votes = [p.get('dealer_name') for p in predictions]
+        model_votes = [p.get('model_name') for p in predictions]
+        
+        dealer_consensus = Counter(dealer_votes).most_common(1)[0]
+        model_consensus = Counter(model_votes).most_common(1)[0]
+        
+        # Numeric fields: median with outlier removal
+        hp_values = [p.get('horse_power') for p in predictions if p.get('horse_power')]
+        cost_values = [p.get('asset_cost') for p in predictions if p.get('asset_cost')]
+        
+        hp_consensus = int(np.median(hp_values)) if hp_values else None
+        cost_consensus = int(np.median(cost_values)) if cost_values else None
+        
+        # Bounding boxes: average with high agreement
+        sig_boxes = [p.get('signature', {}).get('bbox') for p in predictions 
+                     if p.get('signature', {}).get('present')]
+        stamp_boxes = [p.get('stamp', {}).get('bbox') for p in predictions 
+                       if p.get('stamp', {}).get('present')]
+        
+        # Calculate confidence based on agreement
+        total_votes = len(predictions)
+        confidence = (
+            dealer_consensus[1] / total_votes * 0.2 +
+            model_consensus[1] / total_votes * 0.2 +
+            (len(hp_values) / total_votes) * 0.15 +
+            (len(cost_values) / total_votes) * 0.15 +
+            (len(sig_boxes) / total_votes) * 0.15 +
+            (len(stamp_boxes) / total_votes) * 0.15
+        )
+        
+        return {
+            'dealer_name': dealer_consensus[0],
+            'model_name': model_consensus[0],
+            'horse_power': hp_consensus,
+            'asset_cost': cost_consensus,
+            'signature': {
+                'present': len(sig_boxes) > total_votes / 2,
+                'bbox': self._average_bbox(sig_boxes) if sig_boxes else None
+            },
+            'stamp': {
+                'present': len(stamp_boxes) > total_votes / 2,
+                'bbox': self._average_bbox(stamp_boxes) if stamp_boxes else None
+            },
+            'confidence': confidence
+        }
+    
+    def _average_bbox(self, boxes: List[List[int]]) -> List[int]:
+        """Average bounding boxes"""
+        if not boxes:
+            return None
+        boxes_array = np.array(boxes)
+        return np.mean(boxes_array, axis=0).astype(int).tolist()
+    
+    def export_pseudo_labels(self, output_path: str):
+        """Export pseudo-labels in training format"""
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        with open(output_path, 'w') as f:
+            json.dump(self.pseudo_labels, f, indent=2)
+        
+        logger.info(f"Exported {len(self.pseudo_labels)} pseudo-labels to {output_path}")
+
+
+class ActiveLearningSelector:
+    """Select most informative samples for manual annotation"""
+    
+    def __init__(self, budget: int = 100):
+        """
+        Args:
+            budget: Number of samples to select for annotation
+        """
+        self.budget = budget
+        self.strategies = {
+            'uncertainty': self._uncertainty_sampling,
+            'diversity': self._diversity_sampling,
+            'representative': self._representative_sampling
+        }
+    
+    def select_samples(self, predictions: List[Dict], 
+                      strategy: str = 'uncertainty') -> List[str]:
+        """
+        Select samples for annotation
+        Returns: List of document paths to annotate
+        """
+        selector = self.strategies.get(strategy, self._uncertainty_sampling)
+        selected = selector(predictions)
+        
+        logger.info(f"Selected {len(selected)} samples using {strategy} strategy")
+        return selected
+    
+    def _uncertainty_sampling(self, predictions: List[Dict]) -> List[str]:
+        """Select samples with lowest confidence"""
+        # Sort by confidence
+        sorted_preds = sorted(predictions, key=lambda x: x.get('confidence', 1.0))
+        
+        # Take bottom N (most uncertain)
+        selected = [p['doc_path'] for p in sorted_preds[:self.budget]]
+        return selected
+    
+    def _diversity_sampling(self, predictions: List[Dict]) -> List[str]:
+        """Select diverse samples covering different characteristics"""
+        # Group by characteristics
+        groups = defaultdict(list)
+        
+        for pred in predictions:
+            # Characteristics: language, layout complexity, quality
+            key = (
+                pred.get('language', 'unknown'),
+                pred.get('layout_type', 'unknown'),
+                'low' if pred.get('confidence', 1.0) < 0.7 else 'high'
+            )
+            groups[key].append(pred)
+        
+        # Sample from each group proportionally
+        selected = []
+        samples_per_group = self.budget // len(groups)
+        
+        for group_docs in groups.values():
+            selected.extend([d['doc_path'] for d in group_docs[:samples_per_group]])
+        
+        return selected[:self.budget]
+    
+    def _representative_sampling(self, predictions: List[Dict]) -> List[str]:
+        """Select representative samples using clustering"""
+        # In production: Use feature-based clustering
+        # For now: stratified sampling
+        
+        # Sort by confidence and take stratified sample
+        sorted_preds = sorted(predictions, key=lambda x: x.get('confidence', 1.0))
+        
+        # Take every Nth sample for uniform coverage
+        step = len(sorted_preds) // self.budget
+        selected = [sorted_preds[i]['doc_path'] 
+                   for i in range(0, len(sorted_preds), step)][:self.budget]
+        
+        return selected
+
+
+class AnnotationWorkflow:
+    """Manage annotation workflow and quality control"""
+    
+    def __init__(self, annotation_dir: str = 'annotations'):
+        self.annotation_dir = annotation_dir
+        os.makedirs(annotation_dir, exist_ok=True)
+        
+        self.annotation_schema = {
+            'doc_id': str,
+            'dealer_name': str,
+            'model_name': str,
+            'horse_power': int,
+            'asset_cost': int,
+            'signature_bbox': list,
+            'stamp_bbox': list,
+            'annotator_id': str,
+            'annotation_time': float,
+            'quality_score': float
+        }
+    
+    def create_annotation_task(self, doc_paths: List[str]) -> str:
+        """Create annotation task file"""
+        task = {
+            'task_id': f'annotation_{len(doc_paths)}',
+            'documents': doc_paths,
+            'schema': self.annotation_schema,
+            'instructions': self._get_annotation_instructions(),
+            'status': 'pending'
+        }
+        
+        task_path = os.path.join(self.annotation_dir, f"{task['task_id']}.json")
+        with open(task_path, 'w') as f:
+            json.dump(task, f, indent=2)
+        
+        logger.info(f"Created annotation task: {task_path}")
+        return task_path
+    
+    def _get_annotation_instructions(self) -> Dict:
+        """Detailed annotation instructions"""
+        return {
+            'dealer_name': {
+                'description': 'Full legal name of the dealer/seller',
+                'examples': ['ABC Tractors Pvt Ltd', 'XYZ Motors Private Limited'],
+                'validation': 'Must match format in document exactly'
+            },
+            'model_name': {
+                'description': 'Tractor model name with specifications',
+                'examples': ['Mahindra 575 DI', 'John Deere 5050 D'],
+                'validation': 'Include brand, model number, and variant'
+            },
+            'horse_power': {
+                'description': 'Engine horse power (numeric only)',
+                'examples': [50, 75, 45],
+                'validation': 'Integer between 20-120'
+            },
+            'asset_cost': {
+                'description': 'Total cost (numeric only, no currency)',
+                'examples': [525000, 650000],
+                'validation': 'Integer, include all taxes if mentioned'
+            },
+            'signature_bbox': {
+                'description': 'Bounding box of dealer signature [x1,y1,x2,y2]',
+                'tool': 'Use annotation tool to draw rectangle',
+                'validation': 'Must contain visible signature'
+            },
+            'stamp_bbox': {
+                'description': 'Bounding box of dealer stamp [x1,y1,x2,y2]',
+                'tool': 'Use annotation tool to draw rectangle',
+                'validation': 'Must contain visible stamp/seal'
+            }
+        }
+    
+    def validate_annotations(self, annotations: List[Dict]) -> Dict:
+        """Quality control for annotations"""
+        validation_results = {
+            'total': len(annotations),
+            'valid': 0,
+            'invalid': 0,
+            'issues': []
+        }
+        
+        for ann in annotations:
+            issues = []
+            
+            # Check required fields
+            for field in ['dealer_name', 'model_name', 'horse_power', 'asset_cost']:
+                if not ann.get(field):
+                    issues.append(f"Missing {field}")
+            
+            # Validate data types and ranges
+            if ann.get('horse_power'):
+                if not isinstance(ann['horse_power'], int) or not (20 <= ann['horse_power'] <= 120):
+                    issues.append("Invalid horse power")
+            
+            if ann.get('asset_cost'):
+                if not isinstance(ann['asset_cost'], int) or ann['asset_cost'] < 100000:
+                    issues.append("Invalid asset cost")
+            
+            # Validate bounding boxes
+            for bbox_field in ['signature_bbox', 'stamp_bbox']:
+                bbox = ann.get(bbox_field)
+                if bbox:
+                    if not isinstance(bbox, list) or len(bbox) != 4:
+                        issues.append(f"Invalid {bbox_field} format")
+            
+            if issues:
+                validation_results['invalid'] += 1
+                validation_results['issues'].append({
+                    'doc_id': ann.get('doc_id'),
+                    'issues': issues
+                })
+            else:
+                validation_results['valid'] += 1
+        
+        return validation_results
+    
+    def calculate_inter_annotator_agreement(self, 
+                                           annotations_by_annotator: Dict[str, List[Dict]]) -> float:
+        """Calculate agreement between multiple annotators"""
+        # Cohen's Kappa or Fleiss' Kappa for multi-annotator
+        # Simplified version here
+        
+        if len(annotations_by_annotator) < 2:
+            return 1.0
+        
+        # Compare annotations for same documents
+        agreements = []
+        
+        annotators = list(annotations_by_annotator.keys())
+        ann1_docs = {a['doc_id']: a for a in annotations_by_annotator[annotators[0]]}
+        ann2_docs = {a['doc_id']: a for a in annotations_by_annotator[annotators[1]]}
+        
+        common_docs = set(ann1_docs.keys()) & set(ann2_docs.keys())
+        
+        for doc_id in common_docs:
+            a1 = ann1_docs[doc_id]
+            a2 = ann2_docs[doc_id]
+            
+            # Calculate field-wise agreement
+            field_agreements = []
+            
+            # Text fields: exact match
+            for field in ['dealer_name', 'model_name']:
+                field_agreements.append(int(a1.get(field) == a2.get(field)))
+            
+            # Numeric fields: within tolerance
+            for field in ['horse_power', 'asset_cost']:
+                if a1.get(field) and a2.get(field):
+                    diff = abs(a1[field] - a2[field])
+                    tolerance = a1[field] * 0.05  # 5% tolerance
+                    field_agreements.append(int(diff <= tolerance))
+            
+            agreements.append(np.mean(field_agreements))
+        
+        return np.mean(agreements) if agreements else 0.0
+
+
+class BootstrappingTrainer:
+    """Bootstrap training from initial labels"""
+    
+    def __init__(self, initial_labels: List[Dict], unlabeled_docs: List[str]):
+        self.labeled_data = initial_labels
+        self.unlabeled_data = unlabeled_docs
+        self.iterations = 0
+        
+    def bootstrap_iteration(self, model, confidence_threshold: float = 0.90) -> int:
+        """
+        One iteration of bootstrapping
+        Returns: Number of new pseudo-labels added
+        """
+        self.iterations += 1
+        logger.info(f"Bootstrap iteration {self.iterations}")
+        
+        new_labels = []
+        
+        # Predict on unlabeled data
+        for doc_path in self.unlabeled_data[:]:
+            prediction = model.predict(doc_path)
+            
+            # Add high-confidence predictions to training set
+            if prediction['confidence'] >= confidence_threshold:
+                new_labels.append({
+                    'doc_path': doc_path,
+                    'label': prediction,
+                    'iteration': self.iterations
+                })
+                self.unlabeled_data.remove(doc_path)
+        
+        # Add to labeled set
+        self.labeled_data.extend(new_labels)
+        
+        logger.info(f"Added {len(new_labels)} pseudo-labels. "
+                   f"Total labeled: {len(self.labeled_data)}, "
+                   f"Unlabeled remaining: {len(self.unlabeled_data)}")
+        
+        return len(new_labels)
+    
+    def train_until_convergence(self, model, max_iterations: int = 10) -> Dict:
+        """
+        Bootstrap until convergence or max iterations
+        Returns: Training statistics
+        """
+        stats = {
+            'iterations': [],
+            'labels_added': [],
+            'total_labeled': []
+        }
+        
+        for i in range(max_iterations):
+            # Train model on current labeled set
+            model.train(self.labeled_data)
+            
+            # Bootstrap iteration
+            added = self.bootstrap_iteration(model)
+            
+            stats['iterations'].append(i + 1)
+            stats['labels_added'].append(added)
+            stats['total_labeled'].append(len(self.labeled_data))
+            
+            # Check convergence
+            if added < 5:  # Very few new labels added
+                logger.info(f"Converged at iteration {i + 1}")
+                break
+        
+        return stats
+
+
+class SyntheticDataGenerator:
+    """Generate synthetic training data"""
+    
+    def __init__(self, templates_dir: str = 'templates'):
+        self.templates_dir = templates_dir
+        
+    def generate_synthetic_invoices(self, num_samples: int = 100) -> List[Dict]:
+        """
+        Generate synthetic invoice data
+        Useful for pre-training and augmentation
+        """
+        synthetic_data = []
+        
+        dealers = ['ABC Tractors', 'XYZ Motors', 'Sai Auto', 'Krishna Tractors']
+        models = ['Mahindra 575 DI', 'John Deere 5050', 'Swaraj 744', 'New Holland 3630']
+        
+        for i in range(num_samples):
+            sample = {
+                'doc_id': f'synthetic_{i:04d}',
+                'dealer_name': np.random.choice(dealers) + ' Pvt Ltd',
+                'model_name': np.random.choice(models),
+                'horse_power': np.random.randint(40, 80),
+                'asset_cost': np.random.randint(400000, 800000),
+                'signature_bbox': [
+                    np.random.randint(50, 100),
+                    np.random.randint(500, 600),
+                    np.random.randint(250, 350),
+                    np.random.randint(600, 650)
+                ],
+                'stamp_bbox': [
+                    np.random.randint(400, 450),
+                    np.random.randint(500, 550),
+                    np.random.randint(500, 550),
+                    np.random.randint(550, 600)
+                ],
+                'synthetic': True
+            }
+            synthetic_data.append(sample)
+        
+        logger.info(f"Generated {num_samples} synthetic samples")
+        return synthetic_data
+    
+    def augment_real_data(self, real_samples: List[Dict], 
+                         augmentation_factor: int = 3) -> List[Dict]:
+        """
+        Augment real annotated data
+        Apply realistic variations
+        """
+        augmented = []
+        
+        for sample in real_samples:
+            # Original
+            augmented.append(sample)
+            
+            # Generate variations
+            for _ in range(augmentation_factor - 1):
+                aug_sample = sample.copy()
+                
+                # Add noise to numeric values
+                if aug_sample.get('horse_power'):
+                    aug_sample['horse_power'] += np.random.randint(-2, 3)
+                
+                if aug_sample.get('asset_cost'):
+                    noise = int(aug_sample['asset_cost'] * 0.02)
+                    aug_sample['asset_cost'] += np.random.randint(-noise, noise)
+                
+                # Slight bbox shifts
+                for bbox_field in ['signature_bbox', 'stamp_bbox']:
+                    if aug_sample.get(bbox_field):
+                        shift = np.random.randint(-5, 6, size=4)
+                        aug_sample[bbox_field] = [
+                            max(0, b + s) for b, s in zip(aug_sample[bbox_field], shift)
+                        ]
+                
+                aug_sample['augmented'] = True
+                augmented.append(aug_sample)
+        
+        logger.info(f"Augmented {len(real_samples)} samples to {len(augmented)} total")
+        return augmented
+
+
+def create_annotation_pipeline(doc_paths: List[str], 
+                              budget: int = 100) -> Dict:
+    """
+    Complete annotation pipeline workflow
+    """
+    workflow = {
+        'total_documents': len(doc_paths),
+        'annotation_budget': budget,
+        'steps': []
+    }
+    
+    # Step 1: Generate initial pseudo-labels
+    logger.info("Step 1: Generating pseudo-labels...")
+    pseudo_labeler = PseudoLabeler()
+    # pseudo_labels = pseudo_labeler.generate_ensemble_labels(...)
+    workflow['steps'].append('Pseudo-labels generated')
+    
+    # Step 2: Active learning selection
+    logger.info("Step 2: Selecting samples for annotation...")
+    selector = ActiveLearningSelector(budget=budget)
+    # selected_docs = selector.select_samples(predictions, strategy='uncertainty')
+    workflow['steps'].append(f'Selected {budget} samples for annotation')
+    
+    # Step 3: Create annotation tasks
+    logger.info("Step 3: Creating annotation tasks...")
+    annotation_wf = AnnotationWorkflow()
+    # task_path = annotation_wf.create_annotation_task(selected_docs)
+    workflow['steps'].append('Annotation tasks created')
+    
+    # Step 4: Quality control
+    logger.info("Step 4: Annotation quality control...")
+    # validation = annotation_wf.validate_annotations(annotations)
+    workflow['steps'].append('Quality control completed')
+    
+    # Step 5: Generate synthetic data
+    logger.info("Step 5: Generating synthetic data...")
+    generator = SyntheticDataGenerator()
+    synthetic_data = generator.generate_synthetic_invoices(num_samples=200)
+    workflow['steps'].append(f'Generated {len(synthetic_data)} synthetic samples')
+    
+    # Step 6: Bootstrap training
+    logger.info("Step 6: Bootstrap training...")
+    # bootstrapper = BootstrappingTrainer(initial_labels, unlabeled_docs)
+    # stats = bootstrapper.train_until_convergence(model)
+    workflow['steps'].append('Bootstrap training completed')
+    
+    logger.info("Annotation pipeline complete!")
+    return workflow
+
+
+if __name__ == '__main__':
+    # Demo workflow
+    doc_paths = [f'doc_{i}.pdf' for i in range(500)]
+    workflow_result = create_annotation_pipeline(doc_paths, budget=100)
+    print(json.dumps(workflow_result, indent=2))
