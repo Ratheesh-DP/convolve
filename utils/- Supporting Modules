@@ -1,0 +1,481 @@
+"""
+Supporting utility modules for invoice extraction pipeline
+"""
+
+# ============================================================================
+# utils/pdf_processor.py
+# ============================================================================
+
+import cv2
+import numpy as np
+from PIL import Image
+from typing import List, Tuple
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class PDFProcessor:
+    """Convert and preprocess PDF documents"""
+    
+    def __init__(self, dpi: int = 300):
+        self.dpi = dpi
+    
+    def pdf_to_images(self, pdf_path: str) -> List[np.ndarray]:
+        """
+        Convert PDF to high-quality images
+        In production: use pdf2image or PyMuPDF
+        """
+        try:
+            # Simulated conversion
+            # Real: from pdf2image import convert_from_path
+            # images = convert_from_path(pdf_path, dpi=self.dpi)
+            logger.info(f"Converting PDF: {pdf_path} at {self.dpi} DPI")
+            return []
+        except Exception as e:
+            logger.error(f"PDF conversion error: {str(e)}")
+            return []
+    
+    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        Preprocess image for better OCR results
+        - Deskew
+        - Denoise
+        - Contrast enhancement
+        """
+        # Convert to grayscale
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+        
+        # Denoise
+        denoised = cv2.fastNlMeansDenoising(gray)
+        
+        # Adaptive thresholding
+        binary = cv2.adaptiveThreshold(
+            denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 11, 2
+        )
+        
+        # Deskew
+        deskewed = self._deskew(binary)
+        
+        return deskewed
+    
+    def _deskew(self, image: np.ndarray) -> np.ndarray:
+        """Correct image rotation"""
+        coords = np.column_stack(np.where(image > 0))
+        if len(coords) == 0:
+            return image
+        
+        angle = cv2.minAreaRect(coords)[-1]
+        if angle < -45:
+            angle = -(90 + angle)
+        else:
+            angle = -angle
+        
+        if abs(angle) < 0.5:  # Skip if nearly straight
+            return image
+        
+        (h, w) = image.shape[:2]
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(
+            image, M, (w, h),
+            flags=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_REPLICATE
+        )
+        
+        return rotated
+
+
+# ============================================================================
+# utils/ocr_engine.py
+# ============================================================================
+
+from typing import List, Dict, Tuple
+import re
+
+
+class OCREngine:
+    """Multilingual OCR extraction"""
+    
+    def __init__(self, languages: List[str] = ['en', 'hi', 'gu']):
+        self.languages = languages
+        logger.info(f"Initialized OCR engine for languages: {languages}")
+        # In production: Initialize PaddleOCR
+        # self.ocr = PaddleOCR(lang='en', use_angle_cls=True)
+    
+    def extract_text(self, image: np.ndarray) -> Dict[str, Any]:
+        """
+        Extract text with coordinates
+        Returns: {
+            'text': full text,
+            'words': [{text, bbox, confidence}, ...],
+            'lines': [{text, bbox, confidence}, ...]
+        }
+        """
+        # Simulated OCR result
+        # Real: result = self.ocr.ocr(image, cls=True)
+        
+        return {
+            'text': self._simulate_ocr_text(),
+            'words': self._simulate_word_boxes(),
+            'lines': self._simulate_line_boxes()
+        }
+    
+    def _simulate_ocr_text(self) -> str:
+        return """
+        ABC Tractors Pvt Ltd
+        Ahmedabad, Gujarat
+        
+        QUOTATION
+        
+        Date: 15/01/2024
+        Quotation No: QT-2024-001
+        
+        Model: Mahindra 575 DI
+        Horse Power: 50 HP
+        Engine: 2730 CC
+        
+        Ex-Showroom Price: Rs. 4,75,000
+        GST (18%): Rs. 85,500
+        Total Cost: Rs. 5,60,500
+        
+        Terms and Conditions:
+        - Valid for 30 days
+        - Delivery in 15 days
+        
+        Authorized Signature
+        """
+    
+    def _simulate_word_boxes(self) -> List[Dict]:
+        """Simulate word-level OCR with bounding boxes"""
+        return [
+            {'text': 'ABC', 'bbox': [50, 50, 100, 80], 'confidence': 0.98},
+            {'text': 'Tractors', 'bbox': [110, 50, 200, 80], 'confidence': 0.97},
+            # ... more words
+        ]
+    
+    def _simulate_line_boxes(self) -> List[Dict]:
+        """Simulate line-level OCR"""
+        return [
+            {'text': 'ABC Tractors Pvt Ltd', 'bbox': [50, 50, 300, 80], 'confidence': 0.96},
+            # ... more lines
+        ]
+    
+    def detect_language(self, text: str) -> str:
+        """Detect primary language of text"""
+        # Simple heuristic
+        if any(ord(c) >= 0x0900 and ord(c) <= 0x097F for c in text):
+            return 'hindi'
+        elif any(ord(c) >= 0x0A80 and ord(c) <= 0x0AFF for c in text):
+            return 'gujarati'
+        else:
+            return 'english'
+
+
+# ============================================================================
+# utils/field_extractor.py
+# ============================================================================
+
+import re
+from typing import Optional, Tuple, List
+from rapidfuzz import fuzz
+
+
+class FieldExtractor:
+    """Extract structured fields from OCR text"""
+    
+    def __init__(self, master_dealers: List[str] = None, master_models: List[str] = None):
+        self.master_dealers = master_dealers or self._load_master_dealers()
+        self.master_models = master_models or self._load_master_models()
+    
+    def _load_master_dealers(self) -> List[str]:
+        """Load dealer master list"""
+        # In production: Load from database or CSV
+        return [
+            'ABC Tractors Pvt Ltd',
+            'XYZ Motors Private Limited',
+            'Sai Auto Sales',
+            'Shree Krishna Tractors',
+            # ... more dealers
+        ]
+    
+    def _load_master_models(self) -> List[str]:
+        """Load asset/model master list"""
+        return [
+            'Mahindra 575 DI',
+            'John Deere 5050 D',
+            'Swaraj 744 FE',
+            'New Holland 3630 TX',
+            # ... more models
+        ]
+    
+    def extract_dealer_name(self, text: str) -> Tuple[str, float]:
+        """
+        Extract and fuzzy match dealer name
+        Returns: (dealer_name, confidence)
+        """
+        # Pattern for dealer names
+        patterns = [
+            r'([A-Z][A-Za-z\s]+(?:Tractors|Motors|Auto|Vehicles|Sales)[A-Za-z\s]*(?:Pvt Ltd|Ltd|Private Limited)?)',
+            r'([A-Z][A-Za-z\s]+ (?:Pvt Ltd|Ltd|Private Limited))',
+        ]
+        
+        candidates = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text)
+            candidates.extend(matches)
+        
+        if not candidates:
+            return "Unknown", 0.0
+        
+        # Fuzzy match against master list
+        best_match = None
+        best_score = 0.0
+        
+        for candidate in candidates:
+            candidate = candidate.strip()
+            for master in self.master_dealers:
+                score = fuzz.ratio(candidate.lower(), master.lower()) / 100.0
+                if score > best_score:
+                    best_score = score
+                    best_match = master if score > 0.85 else candidate
+        
+        return best_match or candidates[0], min(best_score, 0.95)
+    
+    def extract_model_name(self, text: str) -> Tuple[str, float]:
+        """
+        Extract and exact match model name
+        Returns: (model_name, confidence)
+        """
+        # Look for model patterns
+        patterns = [
+            r'Model:\s*([A-Za-z0-9\s]+(?:DI|XP|HP|D|TX|FE)?)',
+            r'(?:Tractor|Vehicle) Model:\s*([A-Za-z0-9\s]+)',
+            r'([A-Z][a-z]+\s+\d{3,4}\s*[A-Z]{0,2})'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                model = match.group(1).strip()
+                
+                # Exact match against master
+                if model in self.master_models:
+                    return model, 0.98
+                
+                # Try fuzzy match
+                for master in self.master_models:
+                    if fuzz.ratio(model.lower(), master.lower()) > 90:
+                        return master, 0.92
+                
+                return model, 0.75
+        
+        return "Unknown", 0.0
+    
+    def extract_horse_power(self, text: str) -> Tuple[Optional[int], float]:
+        """
+        Extract horse power value
+        Returns: (hp_value, confidence)
+        """
+        patterns = [
+            r'(?:Horse\s*Power|HP):\s*(\d+)\s*HP?',
+            r'(\d{2,3})\s*HP',
+            r'HP:\s*(\d+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                hp = int(match.group(1))
+                # Validate range (typical tractor HP: 20-120)
+                if 20 <= hp <= 120:
+                    return hp, 0.95
+                return hp, 0.70
+        
+        return None, 0.0
+    
+    def extract_asset_cost(self, text: str) -> Tuple[Optional[int], float]:
+        """
+        Extract total asset cost (numeric only)
+        Returns: (cost, confidence)
+        """
+        # Patterns for various cost formats
+        patterns = [
+            r'Total\s+Cost:\s*Rs\.?\s*([\d,]+)',
+            r'Total\s+(?:Amount|Price):\s*Rs\.?\s*([\d,]+)',
+            r'Grand\s+Total:\s*Rs\.?\s*([\d,]+)',
+            r'(?:Total|Amount):\s*₹?\s*([\d,]+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                cost_str = match.group(1).replace(',', '')
+                try:
+                    cost = int(cost_str)
+                    # Validate range (typical tractor cost: 2L-20L)
+                    if 200000 <= cost <= 2000000:
+                        return cost, 0.95
+                    return cost, 0.75
+                except ValueError:
+                    continue
+        
+        return None, 0.0
+
+
+# ============================================================================
+# utils/detector.py
+# ============================================================================
+
+from typing import Dict, Tuple, List
+
+
+class SignatureStampDetector:
+    """Detect signatures and stamps using object detection"""
+    
+    def __init__(self, model_type: str = 'yolov8n'):
+        self.model_type = model_type
+        logger.info(f"Initialized detector: {model_type}")
+        # In production: Load YOLOv8 model
+        # self.model = YOLO('signature_stamp_detector.pt')
+    
+    def detect_signature(self, image: np.ndarray) -> Tuple[Dict, float]:
+        """
+        Detect signature in image
+        Returns: ({present, bbox, confidence}, overall_confidence)
+        """
+        # Simulate detection
+        # Real: results = self.model.predict(image, classes=[0])  # 0=signature
+        
+        # Simulate detection result
+        detected = np.random.random() > 0.1
+        
+        if detected:
+            # Simulated bounding box
+            bbox = [100, 200, 300, 250]
+            conf = np.random.uniform(0.85, 0.98)
+            
+            return {
+                'present': True,
+                'bbox': bbox,
+                'confidence': conf
+            }, conf
+        
+        return {'present': False, 'bbox': None, 'confidence': 0.0}, 0.5
+    
+    def detect_stamp(self, image: np.ndarray) -> Tuple[Dict, float]:
+        """
+        Detect stamp in image
+        Returns: ({present, bbox, confidence}, overall_confidence)
+        """
+        # Simulate detection
+        detected = np.random.random() > 0.15
+        
+        if detected:
+            bbox = [400, 500, 500, 550]
+            conf = np.random.uniform(0.80, 0.96)
+            
+            return {
+                'present': True,
+                'bbox': bbox,
+                'confidence': conf
+            }, conf
+        
+        return {'present': False, 'bbox': None, 'confidence': 0.0}, 0.5
+    
+    def train_detector(self, annotated_images: List[str], 
+                      annotations: List[Dict], epochs: int = 50):
+        """
+        Train custom detector on annotated data
+        Args:
+            annotated_images: List of image paths
+            annotations: List of annotation dicts with bboxes
+            epochs: Training epochs
+        """
+        # In production: Fine-tune YOLO on custom dataset
+        logger.info(f"Training detector on {len(annotated_images)} images for {epochs} epochs")
+        # self.model.train(data='config.yaml', epochs=epochs)
+
+
+# ============================================================================
+# utils/validator.py
+# ============================================================================
+
+class FieldValidator:
+    """Validate and score extracted fields"""
+    
+    def __init__(self):
+        self.validation_rules = {
+            'dealer_name': self._validate_dealer,
+            'model_name': self._validate_model,
+            'horse_power': self._validate_hp,
+            'asset_cost': self._validate_cost,
+            'signature': self._validate_bbox,
+            'stamp': self._validate_bbox
+        }
+    
+    def validate_all(self, fields: Dict) -> Tuple[bool, float, Dict]:
+        """
+        Validate all fields
+        Returns: (all_valid, confidence_score, field_confidences)
+        """
+        field_confs = {}
+        
+        for field, value in fields.items():
+            validator = self.validation_rules.get(field)
+            if validator:
+                valid, conf = validator(value)
+                field_confs[field] = conf
+            else:
+                field_confs[field] = 0.5
+        
+        all_valid = all(c > 0.5 for c in field_confs.values())
+        overall_conf = np.mean(list(field_confs.values()))
+        
+        return all_valid, overall_conf, field_confs
+    
+    def _validate_dealer(self, value: str) -> Tuple[bool, float]:
+        """Validate dealer name"""
+        if not value or value == "Unknown":
+            return False, 0.0
+        if len(value) < 3:
+            return False, 0.2
+        return True, 0.9
+    
+    def _validate_model(self, value: str) -> Tuple[bool, float]:
+        """Validate model name"""
+        if not value or value == "Unknown":
+            return False, 0.0
+        return True, 0.9
+    
+    def _validate_hp(self, value: Optional[int]) -> Tuple[bool, float]:
+        """Validate horse power"""
+        if value is None:
+            return False, 0.0
+        if not (20 <= value <= 120):
+            return False, 0.3
+        return True, 0.95
+    
+    def _validate_cost(self, value: Optional[int]) -> Tuple[bool, float]:
+        """Validate asset cost"""
+        if value is None:
+            return False, 0.0
+        if not (200000 <= value <= 2000000):
+            return False, 0.3
+        return True, 0.95
+    
+    def _validate_bbox(self, value: Dict) -> Tuple[bool, float]:
+        """Validate bounding box detection"""
+        if not value.get('present'):
+            return True, 0.5  # Not detected is valid
+        
+        bbox = value.get('bbox')
+        if not bbox or len(bbox) != 4:
+            return False, 0.0
+        
+        conf = value.get('confidence', 0.0)
+        return True, conf
