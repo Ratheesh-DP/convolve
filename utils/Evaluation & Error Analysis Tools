@@ -1,0 +1,648 @@
+"""
+Comprehensive Evaluation and Error Analysis
+Includes DLA calculation, metrics, visualization, and error categorization
+"""
+
+import json
+import numpy as np
+import pandas as pd
+from typing import List, Dict, Tuple, Optional
+from collections import defaultdict, Counter
+import matplotlib.pyplot as plt
+import seaborn as sns
+from dataclasses import dataclass
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class EvaluationMetrics:
+    """Container for all evaluation metrics"""
+    document_level_accuracy: float
+    field_accuracies: Dict[str, float]
+    signature_map: float
+    stamp_map: float
+    avg_latency: float
+    avg_cost: float
+    total_documents: int
+    successful_extractions: int
+
+
+class DocumentLevelAccuracyCalculator:
+    """Calculate Document-Level Accuracy (DLA)"""
+    
+    def __init__(self, tolerance: float = 0.05, iou_threshold: float = 0.5):
+        """
+        Args:
+            tolerance: Numeric tolerance (5% default)
+            iou_threshold: IoU threshold for bbox matching
+        """
+        self.tolerance = tolerance
+        self.iou_threshold = iou_threshold
+    
+    def calculate_dla(self, predictions: List[Dict], 
+                     ground_truth: List[Dict]) -> Tuple[float, Dict]:
+        """
+        Calculate DLA and detailed field-wise metrics
+        Returns: (DLA, detailed_metrics)
+        """
+        if len(predictions) != len(ground_truth):
+            raise ValueError("Predictions and ground truth must have same length")
+        
+        total_docs = len(predictions)
+        correct_docs = 0
+        field_results = defaultdict(list)
+        
+        # Match predictions to ground truth by doc_id
+        gt_dict = {gt['doc_id']: gt for gt in ground_truth}
+        
+        for pred in predictions:
+            doc_id = pred['doc_id']
+            if doc_id not in gt_dict:
+                logger.warning(f"No ground truth for {doc_id}")
+                continue
+            
+            gt = gt_dict[doc_id]
+            
+            # Check each field
+            dealer_correct = self._check_dealer_name(
+                pred['fields']['dealer_name'],
+                gt['fields']['dealer_name']
+            )
+            
+            model_correct = self._check_model_name(
+                pred['fields']['model_name'],
+                gt['fields']['model_name']
+            )
+            
+            hp_correct = self._check_numeric(
+                pred['fields']['horse_power'],
+                gt['fields']['horse_power']
+            )
+            
+            cost_correct = self._check_numeric(
+                pred['fields']['asset_cost'],
+                gt['fields']['asset_cost']
+            )
+            
+            sig_correct = self._check_bbox(
+                pred['fields']['signature'],
+                gt['fields']['signature']
+            )
+            
+            stamp_correct = self._check_bbox(
+                pred['fields']['stamp'],
+                gt['fields']['stamp']
+            )
+            
+            # Record field results
+            field_results['dealer_name'].append(dealer_correct)
+            field_results['model_name'].append(model_correct)
+            field_results['horse_power'].append(hp_correct)
+            field_results['asset_cost'].append(cost_correct)
+            field_results['signature'].append(sig_correct)
+            field_results['stamp'].append(stamp_correct)
+            
+            # Document is correct only if ALL fields are correct
+            if all([dealer_correct, model_correct, hp_correct, 
+                   cost_correct, sig_correct, stamp_correct]):
+                correct_docs += 1
+        
+        # Calculate DLA
+        dla = correct_docs / total_docs if total_docs > 0 else 0.0
+        
+        # Calculate field-level accuracies
+        field_accuracies = {
+            field: sum(results) / len(results) if results else 0.0
+            for field, results in field_results.items()
+        }
+        
+        detailed_metrics = {
+            'DLA': dla,
+            'correct_documents': correct_docs,
+            'total_documents': total_docs,
+            'field_accuracies': field_accuracies
+        }
+        
+        return dla, detailed_metrics
+    
+    def _check_dealer_name(self, pred: str, gt: str) -> bool:
+        """Fuzzy match dealer name (≥90% similarity)"""
+        from rapidfuzz import fuzz
+        similarity = fuzz.ratio(pred.lower(), gt.lower()) / 100.0
+        return similarity >= 0.90
+    
+    def _check_model_name(self, pred: str, gt: str) -> bool:
+        """Exact match for model name"""
+        return pred.strip().lower() == gt.strip().lower()
+    
+    def _check_numeric(self, pred: Optional[int], gt: Optional[int]) -> bool:
+        """Check numeric within tolerance (±5%)"""
+        if pred is None or gt is None:
+            return pred == gt
+        
+        if gt == 0:
+            return pred == 0
+        
+        diff_pct = abs(pred - gt) / gt
+        return diff_pct <= self.tolerance
+    
+    def _check_bbox(self, pred: Dict, gt: Dict) -> bool:
+        """Check bbox presence and IoU"""
+        pred_present = pred.get('present', False)
+        gt_present = gt.get('present', False)
+        
+        # If both absent, correct
+        if not pred_present and not gt_present:
+            return True
+        
+        # If presence mismatch, incorrect
+        if pred_present != gt_present:
+            return False
+        
+        # Both present: check IoU
+        pred_bbox = pred.get('bbox')
+        gt_bbox = gt.get('bbox')
+        
+        if not pred_bbox or not gt_bbox:
+            return False
+        
+        iou = self._calculate_iou(pred_bbox, gt_bbox)
+        return iou >= self.iou_threshold
+    
+    def _calculate_iou(self, box1: List[int], box2: List[int]) -> float:
+        """Calculate Intersection over Union"""
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        
+        if x2 < x1 or y2 < y1:
+            return 0.0
+        
+        intersection = (x2 - x1) * (y2 - y1)
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union = area1 + area2 - intersection
+        
+        return intersection / union if union > 0 else 0.0
+
+
+class ErrorAnalyzer:
+    """Analyze and categorize extraction errors"""
+    
+    def __init__(self):
+        self.error_categories = {
+            'ocr_error': [],
+            'layout_confusion': [],
+            'language_issue': [],
+            'low_quality': [],
+            'missing_field': [],
+            'numeric_precision': [],
+            'bbox_detection': [],
+            'other': []
+        }
+    
+    def analyze_errors(self, predictions: List[Dict], 
+                      ground_truth: List[Dict]) -> Dict:
+        """
+        Comprehensive error analysis
+        Returns: Error statistics and categorization
+        """
+        gt_dict = {gt['doc_id']: gt for gt in ground_truth}
+        errors_by_doc = []
+        
+        for pred in predictions:
+            doc_id = pred['doc_id']
+            if doc_id not in gt_dict:
+                continue
+            
+            gt = gt_dict[doc_id]
+            doc_errors = self._analyze_document_errors(pred, gt)
+            
+            if doc_errors['has_errors']:
+                errors_by_doc.append(doc_errors)
+                
+                # Categorize errors
+                self._categorize_errors(doc_errors)
+        
+        # Generate statistics
+        error_stats = self._compute_error_statistics()
+        
+        # Generate insights
+        insights = self._generate_insights(errors_by_doc)
+        
+        return {
+            'total_errors': len(errors_by_doc),
+            'error_by_category': {
+                cat: len(errs) for cat, errs in self.error_categories.items()
+            },
+            'error_statistics': error_stats,
+            'insights': insights,
+            'error_examples': errors_by_doc[:10]  # Top 10 examples
+        }
+    
+    def _analyze_document_errors(self, pred: Dict, gt: Dict) -> Dict:
+        """Analyze errors for a single document"""
+        doc_errors = {
+            'doc_id': pred['doc_id'],
+            'has_errors': False,
+            'field_errors': {},
+            'confidence': pred.get('confidence', 0.0)
+        }
+        
+        fields = ['dealer_name', 'model_name', 'horse_power', 
+                 'asset_cost', 'signature', 'stamp']
+        
+        for field in fields:
+            pred_val = pred['fields'].get(field)
+            gt_val = gt['fields'].get(field)
+            
+            if pred_val != gt_val:
+                doc_errors['has_errors'] = True
+                doc_errors['field_errors'][field] = {
+                    'predicted': pred_val,
+                    'ground_truth': gt_val,
+                    'error_type': self._classify_field_error(field, pred_val, gt_val)
+                }
+        
+        return doc_errors
+    
+    def _classify_field_error(self, field: str, pred, gt) -> str:
+        """Classify the type of error"""
+        if pred is None or pred == "" or pred == "Unknown":
+            return 'missing_field'
+        
+        if field in ['horse_power', 'asset_cost']:
+            if isinstance(pred, (int, float)) and isinstance(gt, (int, float)):
+                diff_pct = abs(pred - gt) / gt if gt != 0 else float('inf')
+                if diff_pct < 0.1:
+                    return 'numeric_precision'
+            return 'ocr_error'
+        
+        if field in ['signature', 'stamp']:
+            return 'bbox_detection'
+        
+        # Text fields
+        if isinstance(pred, str) and isinstance(gt, str):
+            from rapidfuzz import fuzz
+            similarity = fuzz.ratio(pred.lower(), gt.lower())
+            if similarity > 70:
+                return 'ocr_error'
+            else:
+                return 'layout_confusion'
+        
+        return 'other'
+    
+    def _categorize_errors(self, doc_errors: Dict):
+        """Categorize document errors"""
+        for field, error_info in doc_errors['field_errors'].items():
+            error_type = error_info['error_type']
+            if error_type in self.error_categories:
+                self.error_categories[error_type].append({
+                    'doc_id': doc_errors['doc_id'],
+                    'field': field,
+                    'predicted': error_info['predicted'],
+                    'ground_truth': error_info['ground_truth']
+                })
+    
+    def _compute_error_statistics(self) -> Dict:
+        """Compute aggregate error statistics"""
+        stats = {}
+        
+        # Most common error types
+        error_counts = {cat: len(errs) 
+                       for cat, errs in self.error_categories.items() if errs}
+        stats['most_common_errors'] = sorted(error_counts.items(), 
+                                            key=lambda x: x[1], reverse=True)
+        
+        # Field-specific error rates
+        field_errors = defaultdict(int)
+        for errors in self.error_categories.values():
+            for error in errors:
+                field_errors[error['field']] += 1
+        stats['errors_by_field'] = dict(field_errors)
+        
+        return stats
+    
+    def _generate_insights(self, errors: List[Dict]) -> List[str]:
+        """Generate actionable insights from errors"""
+        insights = []
+        
+        # Analyze confidence vs errors
+        low_conf_errors = [e for e in errors if e['confidence'] < 0.7]
+        if len(low_conf_errors) > len(errors) * 0.5:
+            insights.append(
+                f"High error rate ({len(low_conf_errors)}/{len(errors)}) "
+                "in low-confidence predictions. Consider rejecting below 0.7."
+            )
+        
+        # Most problematic fields
+        field_error_counts = Counter()
+        for error in errors:
+            for field in error['field_errors']:
+                field_error_counts[field] += 1
+        
+        if field_error_counts:
+            worst_field = field_error_counts.most_common(1)[0]
+            insights.append(
+                f"Field '{worst_field[0]}' has highest error rate "
+                f"({worst_field[1]} errors). Focus improvement here."
+            )
+        
+        # OCR quality issues
+        ocr_errors = len(self.error_categories['ocr_error'])
+        if ocr_errors > len(errors) * 0.3:
+            insights.append(
+                f"OCR errors account for {ocr_errors} errors. "
+                "Consider better preprocessing or OCR engine."
+            )
+        
+        return insights
+
+
+class PerformanceVisualizer:
+    """Generate visualizations for EDA and analysis"""
+    
+    def __init__(self, output_dir: str = 'visualizations'):
+        self.output_dir = output_dir
+        import os
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Set style
+        sns.set_style('whitegrid')
+        plt.rcParams['figure.figsize'] = (12, 6)
+    
+    def plot_field_accuracies(self, metrics: Dict, save_path: Optional[str] = None):
+        """Plot field-level accuracies"""
+        field_accs = metrics['field_accuracies']
+        
+        fig, ax = plt.subplots()
+        fields = list(field_accs.keys())
+        accuracies = [field_accs[f] * 100 for f in fields]
+        
+        bars = ax.bar(fields, accuracies, color='steelblue')
+        
+        # Color code by threshold
+        for i, (bar, acc) in enumerate(zip(bars, accuracies)):
+            if acc >= 95:
+                bar.set_color('green')
+            elif acc >= 90:
+                bar.set_color('orange')
+            else:
+                bar.set_color('red')
+        
+        # Add target line
+        ax.axhline(y=95, color='r', linestyle='--', label='Target (95%)')
+        
+        ax.set_xlabel('Field')
+        ax.set_ylabel('Accuracy (%)')
+        ax.set_title('Field-Level Extraction Accuracy')
+        ax.legend()
+        ax.set_ylim([0, 105])
+        
+        # Add value labels
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{height:.1f}%',
+                   ha='center', va='bottom')
+        
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        else:
+            plt.savefig(f'{self.output_dir}/field_accuracies.png', 
+                       dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def plot_error_distribution(self, error_analysis: Dict, 
+                               save_path: Optional[str] = None):
+        """Plot error category distribution"""
+        error_cats = error_analysis['error_by_category']
+        
+        # Filter non-zero categories
+        error_cats = {k: v for k, v in error_cats.items() if v > 0}
+        
+        if not error_cats:
+            return
+        
+        fig, ax = plt.subplots()
+        categories = list(error_cats.keys())
+        counts = list(error_cats.values())
+        
+        ax.barh(categories, counts, color='coral')
+        ax.set_xlabel('Number of Errors')
+        ax.set_title('Error Distribution by Category')
+        ax.invert_yaxis()
+        
+        # Add value labels
+        for i, count in enumerate(counts):
+            ax.text(count, i, f' {count}', va='center')
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        else:
+            plt.savefig(f'{self.output_dir}/error_distribution.png', 
+                       dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def plot_cost_accuracy_tradeoff(self, experiments: List[Dict],
+                                   save_path: Optional[str] = None):
+        """Plot cost vs accuracy tradeoff"""
+        fig, ax = plt.subplots()
+        
+        for exp in experiments:
+            ax.scatter(exp['cost'], exp['accuracy'] * 100, 
+                      s=exp['latency']*10, alpha=0.6,
+                      label=exp['name'])
+        
+        ax.set_xlabel('Cost per Document ($)')
+        ax.set_ylabel('Document-Level Accuracy (%)')
+        ax.set_title('Cost-Accuracy Tradeoff (bubble size = latency)')
+        ax.axhline(y=95, color='r', linestyle='--', label='Target')
+        ax.axvline(x=0.01, color='r', linestyle='--', label='Cost Limit')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        else:
+            plt.savefig(f'{self.output_dir}/cost_accuracy_tradeoff.png', 
+                       dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def plot_processing_time_distribution(self, results: List[Dict],
+                                         save_path: Optional[str] = None):
+        """Plot processing time distribution"""
+        times = [r['processing_time_sec'] for r in results]
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        
+        # Histogram
+        ax1.hist(times, bins=30, color='skyblue', edgecolor='black', alpha=0.7)
+        ax1.axvline(np.median(times), color='r', linestyle='--', 
+                   label=f'Median: {np.median(times):.2f}s')
+        ax1.axvline(30, color='orange', linestyle='--', 
+                   label='Target: 30s')
+        ax1.set_xlabel('Processing Time (seconds)')
+        ax1.set_ylabel('Frequency')
+        ax1.set_title('Processing Time Distribution')
+        ax1.legend()
+        
+        # Box plot
+        ax2.boxplot(times, vert=True)
+        ax2.set_ylabel('Processing Time (seconds)')
+        ax2.set_title('Processing Time Statistics')
+        ax2.axhline(30, color='orange', linestyle='--', label='Target')
+        ax2.legend()
+        
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        else:
+            plt.savefig(f'{self.output_dir}/processing_time.png', 
+                       dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def generate_eda_report(self, results: List[Dict], 
+                           predictions: List[Dict],
+                           ground_truth: Optional[List[Dict]] = None):
+        """Generate comprehensive EDA report"""
+        logger.info("Generating EDA visualizations...")
+        
+        # 1. Field accuracies (if GT available)
+        if ground_truth:
+            calc = DocumentLevelAccuracyCalculator()
+            dla, metrics = calc.calculate_dla(predictions, ground_truth)
+            self.plot_field_accuracies(metrics)
+        
+        # 2. Processing time analysis
+        self.plot_processing_time_distribution(results)
+        
+        # 3. Confidence distribution
+        self._plot_confidence_distribution(results)
+        
+        # 4. Extraction method usage
+        self._plot_method_usage(results)
+        
+        logger.info(f"EDA visualizations saved to {self.output_dir}/")
+    
+    def _plot_confidence_distribution(self, results: List[Dict]):
+        """Plot confidence score distribution"""
+        confidences = [r['confidence'] for r in results]
+        
+        fig, ax = plt.subplots()
+        ax.hist(confidences, bins=20, color='mediumseagreen', 
+               edgecolor='black', alpha=0.7)
+        ax.axvline(np.mean(confidences), color='r', linestyle='--',
+                  label=f'Mean: {np.mean(confidences):.3f}')
+        ax.set_xlabel('Confidence Score')
+        ax.set_ylabel('Frequency')
+        ax.set_title('Extraction Confidence Distribution')
+        ax.legend()
+        
+        plt.tight_layout()
+        plt.savefig(f'{self.output_dir}/confidence_distribution.png', 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _plot_method_usage(self, results: List[Dict]):
+        """Plot extraction method usage"""
+        methods = [r.get('extraction_method', 'unknown') for r in results]
+        method_counts = Counter(methods)
+        
+        fig, ax = plt.subplots()
+        ax.pie(method_counts.values(), labels=method_counts.keys(), 
+              autopct='%1.1f%%', startangle=90)
+        ax.set_title('Extraction Method Usage')
+        
+        plt.tight_layout()
+        plt.savefig(f'{self.output_dir}/method_usage.png', 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+
+
+def run_comprehensive_evaluation(predictions_path: str,
+                                ground_truth_path: str,
+                                output_dir: str = 'evaluation_results'):
+    """
+    Run complete evaluation pipeline
+    """
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Load data
+    with open(predictions_path) as f:
+        predictions = json.load(f)
+    
+    with open(ground_truth_path) as f:
+        ground_truth = json.load(f)
+    
+    # Calculate DLA
+    logger.info("Calculating Document-Level Accuracy...")
+    calc = DocumentLevelAccuracyCalculator()
+    dla, metrics = calc.calculate_dla(predictions, ground_truth)
+    
+    print(f"\n{'='*60}")
+    print(f"EVALUATION RESULTS")
+    print(f"{'='*60}")
+    print(f"Document-Level Accuracy (DLA): {dla*100:.2f}%")
+    print(f"Target: ≥95% {'✓ PASS' if dla >= 0.95 else '✗ FAIL'}")
+    print(f"\nField-Level Accuracies:")
+    for field, acc in metrics['field_accuracies'].items():
+        print(f"  {field:20s}: {acc*100:.2f}%")
+    
+    # Error analysis
+    logger.info("Performing error analysis...")
+    analyzer = ErrorAnalyzer()
+    error_analysis = analyzer.analyze_errors(predictions, ground_truth)
+    
+    print(f"\nError Analysis:")
+    print(f"  Total errors: {error_analysis['total_errors']}")
+    print(f"  Error categories:")
+    for cat, count in error_analysis['error_by_category'].items():
+        if count > 0:
+            print(f"    {cat:20s}: {count}")
+    
+    print(f"\nInsights:")
+    for insight in error_analysis['insights']:
+        print(f"  • {insight}")
+    
+    # Generate visualizations
+    logger.info("Generating visualizations...")
+    viz = PerformanceVisualizer(output_dir=output_dir)
+    viz.plot_field_accuracies(metrics)
+    viz.plot_error_distribution(error_analysis)
+    viz.plot_processing_time_distribution(predictions)
+    
+    # Save detailed report
+    report = {
+        'dla': dla,
+        'metrics': metrics,
+        'error_analysis': error_analysis
+    }
+    
+    report_path = os.path.join(output_dir, 'evaluation_report.json')
+    with open(report_path, 'w') as f:
+        json.dump(report, f, indent=2)
+    
+    print(f"\n{'='*60}")
+    print(f"Evaluation complete! Results saved to: {output_dir}/")
+    print(f"{'='*60}\n")
+    
+    return report
+
+
+if __name__ == '__main__':
+    # Example usage
+    print("Evaluation and Error Analysis Tools Loaded")
+    print("Use run_comprehensive_evaluation() for full evaluation pipeline")
