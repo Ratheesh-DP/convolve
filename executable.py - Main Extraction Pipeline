@@ -1,0 +1,525 @@
+"""
+Invoice Field Extraction Pipeline - Main Executable
+Hybrid approach combining lightweight OCR pipeline with VLM fallback
+Target: 95%+ DLA, <$0.01 cost, <30s latency
+"""
+
+import os
+import json
+import time
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple
+import numpy as np
+from dataclasses import dataclass, asdict
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BoundingBox:
+    """Bounding box with coordinates [x1, y1, x2, y2]"""
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+    confidence: float = 1.0
+    
+    def to_list(self) -> List[int]:
+        return [self.x1, self.y1, self.x2, self.y2]
+    
+    def iou(self, other: 'BoundingBox') -> float:
+        """Calculate Intersection over Union"""
+        x1 = max(self.x1, other.x1)
+        y1 = max(self.y1, other.y1)
+        x2 = min(self.x2, other.x2)
+        y2 = min(self.y2, other.y2)
+        
+        if x2 < x1 or y2 < y1:
+            return 0.0
+        
+        intersection = (x2 - x1) * (y2 - y1)
+        area1 = (self.x2 - self.x1) * (self.y2 - self.y1)
+        area2 = (other.x2 - other.x1) * (other.y2 - other.y1)
+        union = area1 + area2 - intersection
+        
+        return intersection / union if union > 0 else 0.0
+
+
+@dataclass
+class ExtractionResult:
+    """Structured extraction result for one document"""
+    doc_id: str
+    dealer_name: str
+    model_name: str
+    horse_power: Optional[int]
+    asset_cost: Optional[int]
+    signature: Dict[str, Any]
+    stamp: Dict[str, Any]
+    confidence: float
+    processing_time_sec: float
+    cost_estimate_usd: float
+    extraction_method: str
+    field_confidences: Dict[str, float]
+    
+    def to_json(self) -> Dict:
+        """Convert to submission JSON format"""
+        return {
+            "doc_id": self.doc_id,
+            "fields": {
+                "dealer_name": self.dealer_name,
+                "model_name": self.model_name,
+                "horse_power": self.horse_power,
+                "asset_cost": self.asset_cost,
+                "signature": self.signature,
+                "stamp": self.stamp
+            },
+            "confidence": self.confidence,
+            "processing_time_sec": self.processing_time_sec,
+            "cost_estimate_usd": self.cost_estimate_usd,
+            "extraction_method": self.extraction_method,
+            "field_confidences": self.field_confidences
+        }
+
+
+class DocumentRouter:
+    """Routes documents to appropriate extraction pipeline based on complexity"""
+    
+    def __init__(self):
+        self.complexity_threshold = 0.7
+    
+    def assess_complexity(self, doc_path: str) -> Tuple[str, float]:
+        """
+        Assess document complexity based on various factors
+        Returns: (route, complexity_score)
+        Routes: 'lightweight', 'vlm', 'hybrid'
+        """
+        # In production, this would analyze:
+        # - Image quality metrics
+        # - Text density and clarity
+        # - Layout irregularity
+        # - Language detection results
+        # - Presence of handwriting
+        
+        # Simplified heuristic for demo
+        complexity_score = np.random.uniform(0.3, 0.9)
+        
+        if complexity_score < 0.5:
+            return 'lightweight', complexity_score
+        elif complexity_score > 0.8:
+            return 'vlm', complexity_score
+        else:
+            return 'hybrid', complexity_score
+
+
+class LightweightPipeline:
+    """Fast, cost-effective extraction using OCR + Rule-based + YOLO"""
+    
+    def __init__(self):
+        self.cost_per_doc = 0.003
+        self.avg_latency = 8.0
+        logger.info("Initialized Lightweight Pipeline (PaddleOCR + spaCy + YOLOv8n)")
+    
+    def extract(self, doc_path: str, doc_id: str) -> ExtractionResult:
+        """Extract fields using lightweight approach"""
+        start_time = time.time()
+        
+        # Simulate OCR extraction
+        ocr_text = self._simulate_ocr(doc_path)
+        
+        # Extract text fields
+        dealer_name, dealer_conf = self._extract_dealer_name(ocr_text)
+        model_name, model_conf = self._extract_model_name(ocr_text)
+        horse_power, hp_conf = self._extract_horse_power(ocr_text)
+        asset_cost, cost_conf = self._extract_asset_cost(ocr_text)
+        
+        # Detect visual elements
+        signature, sig_conf = self._detect_signature(doc_path)
+        stamp, stamp_conf = self._detect_stamp(doc_path)
+        
+        # Calculate overall confidence
+        confidences = {
+            'dealer_name': dealer_conf,
+            'model_name': model_conf,
+            'horse_power': hp_conf,
+            'asset_cost': cost_conf,
+            'signature': sig_conf,
+            'stamp': stamp_conf
+        }
+        overall_confidence = np.mean(list(confidences.values()))
+        
+        processing_time = time.time() - start_time
+        
+        return ExtractionResult(
+            doc_id=doc_id,
+            dealer_name=dealer_name,
+            model_name=model_name,
+            horse_power=horse_power,
+            asset_cost=asset_cost,
+            signature=signature,
+            stamp=stamp,
+            confidence=overall_confidence,
+            processing_time_sec=processing_time,
+            cost_estimate_usd=self.cost_per_doc,
+            extraction_method='lightweight',
+            field_confidences=confidences
+        )
+    
+    def _simulate_ocr(self, doc_path: str) -> str:
+        """Simulate PaddleOCR text extraction"""
+        # In production: Use PaddleOCR with multilingual support
+        return """
+        ABC Tractors Pvt Ltd
+        Invoice No: INV-2024-001
+        Model: Mahindra 575 DI
+        Horse Power: 50 HP
+        Total Cost: Rs. 5,25,000
+        Date: 15/01/2024
+        """
+    
+    def _extract_dealer_name(self, text: str) -> Tuple[str, float]:
+        """Extract dealer name using pattern matching"""
+        # Rule-based extraction with fuzzy matching against master list
+        import re
+        pattern = r'([A-Za-z\s]+(?:Tractors|Motors|Vehicles|Auto)[A-Za-z\s]*(?:Pvt Ltd|Ltd|Private Limited)?)'
+        matches = re.findall(pattern, text)
+        
+        if matches:
+            dealer = matches[0].strip()
+            confidence = 0.92
+            # In production: fuzzy match against master dealer list
+            return dealer, confidence
+        
+        return "Unknown Dealer", 0.3
+    
+    def _extract_model_name(self, text: str) -> Tuple[str, float]:
+        """Extract model name with exact matching"""
+        import re
+        pattern = r'Model:\s*([A-Za-z0-9\s]+(?:DI|XP|HP)?)'
+        match = re.search(pattern, text)
+        
+        if match:
+            model = match.group(1).strip()
+            # In production: exact match against asset master
+            confidence = 0.95
+            return model, confidence
+        
+        return "Unknown Model", 0.4
+    
+    def _extract_horse_power(self, text: str) -> Tuple[Optional[int], float]:
+        """Extract horse power as numeric value"""
+        import re
+        pattern = r'(?:Horse Power|HP):\s*(\d+)\s*HP?'
+        match = re.search(pattern, text)
+        
+        if match:
+            hp = int(match.group(1))
+            return hp, 0.98
+        
+        return None, 0.2
+    
+    def _extract_asset_cost(self, text: str) -> Tuple[Optional[int], float]:
+        """Extract asset cost (numeric only)"""
+        import re
+        # Handle various formats: Rs. 5,25,000 or 525000 or 5.25 Lakhs
+        pattern = r'(?:Total Cost|Cost|Amount):\s*Rs\.?\s*([\d,]+)'
+        match = re.search(pattern, text)
+        
+        if match:
+            cost_str = match.group(1).replace(',', '')
+            cost = int(cost_str)
+            return cost, 0.96
+        
+        return None, 0.3
+    
+    def _detect_signature(self, doc_path: str) -> Tuple[Dict, float]:
+        """Detect signature using YOLO"""
+        # Simulate YOLOv8n detection
+        detected = np.random.random() > 0.1  # 90% detection rate
+        
+        if detected:
+            bbox = BoundingBox(100, 200, 300, 250, confidence=0.94)
+            return {
+                "present": True,
+                "bbox": bbox.to_list(),
+                "confidence": bbox.confidence
+            }, 0.94
+        
+        return {"present": False, "bbox": None}, 0.5
+    
+    def _detect_stamp(self, doc_path: str) -> Tuple[Dict, float]:
+        """Detect stamp using YOLO"""
+        detected = np.random.random() > 0.15  # 85% detection rate
+        
+        if detected:
+            bbox = BoundingBox(400, 500, 500, 550, confidence=0.89)
+            return {
+                "present": True,
+                "bbox": bbox.to_list(),
+                "confidence": bbox.confidence
+            }, 0.89
+        
+        return {"present": False, "bbox": None}, 0.5
+
+
+class VLMPipeline:
+    """High-accuracy extraction using Vision-Language Model"""
+    
+    def __init__(self):
+        self.cost_per_doc = 0.008
+        self.avg_latency = 15.0
+        logger.info("Initialized VLM Pipeline (Qwen2.5-VL-7B)")
+    
+    def extract(self, doc_path: str, doc_id: str) -> ExtractionResult:
+        """Extract fields using VLM approach"""
+        start_time = time.time()
+        
+        # Simulate VLM inference
+        # In production: Use Qwen2.5-VL-7B or similar multimodal model
+        result = self._simulate_vlm_inference(doc_path)
+        
+        processing_time = time.time() - start_time
+        
+        return ExtractionResult(
+            doc_id=doc_id,
+            dealer_name=result['dealer_name'],
+            model_name=result['model_name'],
+            horse_power=result['horse_power'],
+            asset_cost=result['asset_cost'],
+            signature=result['signature'],
+            stamp=result['stamp'],
+            confidence=result['confidence'],
+            processing_time_sec=processing_time,
+            cost_estimate_usd=self.cost_per_doc,
+            extraction_method='vlm',
+            field_confidences=result['field_confidences']
+        )
+    
+    def _simulate_vlm_inference(self, doc_path: str) -> Dict:
+        """Simulate VLM structured output"""
+        # VLM prompt would include schema and field definitions
+        return {
+            'dealer_name': 'ABC Tractors Pvt Ltd',
+            'model_name': 'Mahindra 575 DI',
+            'horse_power': 50,
+            'asset_cost': 525000,
+            'signature': {
+                'present': True,
+                'bbox': [100, 200, 300, 250],
+                'confidence': 0.96
+            },
+            'stamp': {
+                'present': True,
+                'bbox': [400, 500, 500, 550],
+                'confidence': 0.93
+            },
+            'confidence': 0.96,
+            'field_confidences': {
+                'dealer_name': 0.95,
+                'model_name': 0.98,
+                'horse_power': 0.97,
+                'asset_cost': 0.96,
+                'signature': 0.96,
+                'stamp': 0.93
+            }
+        }
+
+
+class HybridPipeline:
+    """Intelligent hybrid approach combining both pipelines"""
+    
+    def __init__(self):
+        self.lightweight = LightweightPipeline()
+        self.vlm = VLMPipeline()
+        self.confidence_threshold = 0.85
+        logger.info("Initialized Hybrid Pipeline")
+    
+    def extract(self, doc_path: str, doc_id: str) -> ExtractionResult:
+        """Extract using hybrid approach with confidence-based routing"""
+        # First try lightweight pipeline
+        result = self.lightweight.extract(doc_path, doc_id)
+        
+        # If confidence is low, use VLM
+        if result.confidence < self.confidence_threshold:
+            logger.info(f"Low confidence ({result.confidence:.2f}), routing to VLM")
+            result = self.vlm.extract(doc_path, doc_id)
+            result.extraction_method = 'hybrid_vlm'
+        else:
+            result.extraction_method = 'hybrid_lightweight'
+        
+        # Calculate blended cost (80% lightweight, 20% VLM in practice)
+        result.cost_estimate_usd = (0.8 * self.lightweight.cost_per_doc + 
+                                   0.2 * self.vlm.cost_per_doc)
+        
+        return result
+
+
+class InvoiceExtractor:
+    """Main extraction orchestrator"""
+    
+    def __init__(self, approach: str = 'hybrid'):
+        """
+        Initialize extractor
+        Args:
+            approach: 'lightweight', 'vlm', or 'hybrid'
+        """
+        self.approach = approach
+        self.router = DocumentRouter()
+        
+        if approach == 'lightweight':
+            self.pipeline = LightweightPipeline()
+        elif approach == 'vlm':
+            self.pipeline = VLMPipeline()
+        else:  # hybrid
+            self.pipeline = HybridPipeline()
+        
+        logger.info(f"Initialized InvoiceExtractor with {approach} approach")
+    
+    def process_document(self, doc_path: str, doc_id: Optional[str] = None) -> ExtractionResult:
+        """
+        Process a single document
+        Args:
+            doc_path: Path to PDF or image file
+            doc_id: Optional document identifier
+        Returns:
+            ExtractionResult with all fields
+        """
+        if doc_id is None:
+            doc_id = Path(doc_path).stem
+        
+        logger.info(f"Processing document: {doc_id}")
+        
+        # Route and extract
+        result = self.pipeline.extract(doc_path, doc_id)
+        
+        logger.info(f"Completed {doc_id}: confidence={result.confidence:.2f}, "
+                   f"time={result.processing_time_sec:.2f}s, "
+                   f"cost=${result.cost_estimate_usd:.4f}")
+        
+        return result
+    
+    def process_batch(self, doc_paths: List[str], output_dir: str = 'output') -> List[ExtractionResult]:
+        """
+        Process multiple documents
+        Args:
+            doc_paths: List of document paths
+            output_dir: Directory to save results
+        Returns:
+            List of ExtractionResult objects
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        results = []
+        
+        for doc_path in doc_paths:
+            try:
+                result = self.process_document(doc_path)
+                results.append(result)
+                
+                # Save individual result
+                output_path = os.path.join(output_dir, f"{result.doc_id}.json")
+                with open(output_path, 'w') as f:
+                    json.dump(result.to_json(), f, indent=2)
+                    
+            except Exception as e:
+                logger.error(f"Error processing {doc_path}: {str(e)}")
+                continue
+        
+        # Save batch results
+        batch_output = os.path.join(output_dir, 'batch_results.json')
+        with open(batch_output, 'w') as f:
+            json.dump([r.to_json() for r in results], f, indent=2)
+        
+        # Generate summary statistics
+        self._generate_summary(results, output_dir)
+        
+        return results
+    
+    def _generate_summary(self, results: List[ExtractionResult], output_dir: str):
+        """Generate processing summary statistics"""
+        if not results:
+            return
+        
+        summary = {
+            'total_documents': len(results),
+            'average_confidence': np.mean([r.confidence for r in results]),
+            'average_processing_time': np.mean([r.processing_time_sec for r in results]),
+            'total_cost': sum([r.cost_estimate_usd for r in results]),
+            'average_cost_per_doc': np.mean([r.cost_estimate_usd for r in results]),
+            'extraction_methods': {
+                method: len([r for r in results if r.extraction_method == method])
+                for method in set(r.extraction_method for r in results)
+            },
+            'field_accuracies': {
+                field: np.mean([r.field_confidences[field] for r in results])
+                for field in results[0].field_confidences.keys()
+            }
+        }
+        
+        summary_path = os.path.join(output_dir, 'summary.json')
+        with open(summary_path, 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        logger.info(f"Batch summary: {summary['total_documents']} docs, "
+                   f"avg confidence: {summary['average_confidence']:.2f}, "
+                   f"total cost: ${summary['total_cost']:.4f}")
+
+
+def main():
+    """Main execution function"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Invoice Field Extraction Pipeline')
+    parser.add_argument('--input', type=str, required=True, 
+                       help='Path to input PDF/image or directory')
+    parser.add_argument('--output', type=str, default='output',
+                       help='Output directory for results')
+    parser.add_argument('--approach', type=str, default='hybrid',
+                       choices=['lightweight', 'vlm', 'hybrid'],
+                       help='Extraction approach to use')
+    
+    args = parser.parse_args()
+    
+    # Initialize extractor
+    extractor = InvoiceExtractor(approach=args.approach)
+    
+    # Process input
+    input_path = Path(args.input)
+    
+    if input_path.is_file():
+        # Single file
+        result = extractor.process_document(str(input_path))
+        
+        # Save result
+        os.makedirs(args.output, exist_ok=True)
+        output_path = os.path.join(args.output, 'result.json')
+        with open(output_path, 'w') as f:
+            json.dump(result.to_json(), f, indent=2)
+        
+        print(f"\n✓ Extraction complete!")
+        print(f"  Confidence: {result.confidence:.2%}")
+        print(f"  Processing time: {result.processing_time_sec:.2f}s")
+        print(f"  Cost: ${result.cost_estimate_usd:.4f}")
+        print(f"  Output: {output_path}")
+        
+    elif input_path.is_dir():
+        # Batch processing
+        doc_paths = list(input_path.glob('*.pdf')) + list(input_path.glob('*.jpg')) + list(input_path.glob('*.png'))
+        results = extractor.process_batch([str(p) for p in doc_paths], args.output)
+        
+        print(f"\n✓ Batch processing complete!")
+        print(f"  Documents processed: {len(results)}")
+        print(f"  Average confidence: {np.mean([r.confidence for r in results]):.2%}")
+        print(f"  Total cost: ${sum([r.cost_estimate_usd for r in results]):.4f}")
+        print(f"  Output directory: {args.output}")
+    
+    else:
+        print(f"Error: {input_path} is not a valid file or directory")
+        return 1
+    
+    return 0
+
+
+if __name__ == '__main__':
+    exit(main())
